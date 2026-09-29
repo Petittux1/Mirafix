@@ -1,0 +1,6 @@
+id=mirafix
+name=Mirafix—解决投屏
+version=v1.0
+versionCode=1
+author=Petittux
+description=修复小米/HyperOS 原生投屏到非小米显示器时的 1008 报错（secure buffer mapping / qbuf -22）。Fixes the stock Miracast 1008 error on non-Xiaomi displays by patching libsurfaceflinger so display output buffers are never GRALLOC_USAGE_PROTECTED.
