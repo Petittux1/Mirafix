@@ -264,3 +264,7 @@ Désinstallation complète : supprimer le module dans le gestionnaire (ou `/data
 - Rétro-ingénierie et vérification réalisées sur l'appareil ; le correctif fait 4 octets.
 - À but pédagogique uniquement ; sauvegardez avant de flasher.
 - Auteur : **Petittux**
+
+---
+
+**许可 / License / Licence :** MIT — see [LICENSE](LICENSE)
