@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline tests for Mirafix v1.1 post-fs-data.sh / service.sh decision
+# Offline tests for the Mirafix post-fs-data.sh / service.sh decision
 # branches. Must run as root (needs mount / chcon / nsenter).
 # Not shipped in the module zip.
 set -u
@@ -95,7 +95,7 @@ unbind() {
 	umount -l "$WORK/tgt" 2>/dev/null
 }
 
-echo "== Mirafix v1.1 boot-script branch tests (root) =="
+echo "== Mirafix boot-script branch tests (root) =="
 mk_target
 
 # --- 1. happy path: everything valid -> bind + pending ------------

@@ -6,7 +6,7 @@
 Fixes **stock** Miracast / WFD casting from Xiaomi / HyperOS to **non-Xiaomi displays**.
 Corrige le miroir d'écran **d'origine** (Miracast / WFD) de Xiaomi / HyperOS vers un **écran non Xiaomi**.
 
-**当前版本 / Current release: `v1.2`**
+**当前版本 / Current release: `v1.3`**
 
 ---
 
@@ -82,12 +82,12 @@ setCurWfdErrorCode=1008
 
 ### 安装
 
-方式一（推荐）：管理器 → 模块 → 从本地安装 `Mirafix-v1.2.zip` → 重启。
+方式一（推荐）：管理器 → 模块 → 从本地安装 `Mirafix-v1.3.zip` → 重启。
 
 方式二：命令行
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.3.zip
 reboot
 ```
 
@@ -139,7 +139,7 @@ zip 里**不带任何预编译二进制**，载荷是安装时从本机库现场
 2. Magisk：安全模式下 Magisk 会停用所有模块；KernelSU / ReZukisu 检测到 `ro.sys.safemode` 后会跳过所有模块脚本并禁用模块。
 3. 进系统后在管理器里移除或禁用 Mirafix，再正常重启。
 
-正常情况下**用不到这一步**：v1.2 的 `skip_mount` + 闸门脚本任何异常都只做一件事——不挂载、用原版库开机。
+正常情况下**用不到这一步**：v1.3 的 `skip_mount` + 闸门脚本任何异常都只做一件事——不挂载、用原版库开机。
 
 ### 卸载 / 回滚
 
@@ -231,12 +231,12 @@ Net effect: output buffers never carry `0x4000`, they stay non-secure, and the e
 
 ### Install
 
-Recommended: manager → Modules → Install from local → `Mirafix-v1.2.zip` → reboot.
+Recommended: manager → Modules → Install from local → `Mirafix-v1.3.zip` → reboot.
 
 Or from a shell:
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.3.zip
 reboot
 ```
 
@@ -288,7 +288,7 @@ Enter **safe mode** so no module loads:
 2. Magisk disables all modules in safe mode; KernelSU / ReZukisu detects `ro.sys.safemode` and skips every module script while disabling all modules.
 3. Remove or disable Mirafix in the manager, then reboot normally.
 
-You should not need this with v1.2: `skip_mount` plus the gate scripts mean that **any** failure results in nothing being mounted and the phone booting with the stock library.
+You should not need this with v1.3: `skip_mount` plus the gate scripts mean that **any** failure results in nothing being mounted and the phone booting with the stock library.
 
 ### Uninstall / rollback
 
@@ -380,12 +380,12 @@ Résultat : les buffers de sortie ne portent plus `0x4000`, restent non sécuris
 
 ### Installation
 
-Recommandé : gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.2.zip` → redémarrage.
+Recommandé : gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.3.zip` → redémarrage.
 
 Ou en ligne de commande :
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.3.zip
 reboot
 ```
 
@@ -437,7 +437,7 @@ Entrez en **mode de sécurité** pour qu'aucun module ne se charge :
 2. Magisk désactive tous les modules en mode de sécurité ; KernelSU / ReZukisu détecte `ro.sys.safemode`, ignore tous les scripts de modules et les désactive.
 3. Supprimez ou désactivez Mirafix dans le gestionnaire, puis redémarrez normalement.
 
-Avec v1.2 vous ne devriez pas en avoir besoin : `skip_mount` et les scripts de barrière font que **la moindre anomalie** se traduit par rien de monté et un démarrage sur la bibliothèque d'origine.
+Avec v1.3 vous ne devriez pas en avoir besoin : `skip_mount` et les scripts de barrière font que **la moindre anomalie** se traduit par rien de monté et un démarrage sur la bibliothèque d'origine.
 
 ### Désinstallation / retour arrière
 

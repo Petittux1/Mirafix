@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline unit tests for Mirafix v1.1 customize.sh (install gate).
+# Offline unit tests for the Mirafix install gate (customize.sh).
 # Not shipped in the module zip.
 set -u
 
@@ -133,7 +133,7 @@ expect_tier() { # $1=name $2=tier
 		report "$name" FAIL "tier=${got:-<none>} want $want"
 }
 
-echo "== Mirafix v1.1 install-gate unit tests =="
+echo "== Mirafix install-gate unit tests =="
 
 # --- case 1: fast path (window exactly at 0x5b9ba0) ---------------
 F=$WORK/stock_fast

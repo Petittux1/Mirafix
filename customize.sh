@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # -----------------------------------------------------------------
-# Mirafix — 解决投屏  v1.2   install gate  (customize.sh)
+# Mirafix — 解决投屏  v1.3   install gate  (customize.sh)
 # Sourced by the Magisk / KernelSU installer.
 #
 # The payload is ALWAYS generated from THIS device's own
@@ -103,7 +103,100 @@ hexbytes() { # $1 = hex string (even length)
 	return 0
 }
 
-ui_print "  Mirafix — 解决投屏 v1.2"
+# ---- 2d. byte scanner --------------------------------------------
+# `grep -b` (report byte offsets) does NOT exist in BusyBox grep, and every
+# root solution runs installer scripts under `busybox ash` with
+# ASH_STANDALONE=1, where every command resolves to a BusyBox applet no
+# matter what PATH says. The old `grep -bo` pipeline therefore died with
+# "grep: invalid option -- b", produced nothing, and every install that had
+# to scan came out as "signature not found" - on a device it should have
+# patched. Scan in awk instead: BusyBox ships awk, and awk has the byte
+# offsets built in.
+#
+#   hexscan sig <file>   literal instruction windows  -> "<hex offset>:<hex>"
+#   hexscan orr <file>   candidate `orr ?,?,#0x4000`   -> same, reported at b0
+#
+# The offset indexes the od hex stream (divide by 2 for a file offset) -
+# byte for byte the contract `grep -b` used to give us, so callers are
+# unchanged. Both the program and the fallback must stay free of regex
+# intervals: BusyBox awk has no {n,m} and BusyBox grep has no -b.
+HS_AWK='
+	BEGIN { K = 64; tail = ""; sp = 0; tlen = 0 }
+	{
+		line = $1
+		for (i = 2; i <= NF; i++) line = line $i
+		if (line == "") next
+		buf = tail line
+		tlen = length(tail)
+		if (mode == "sig") {
+			if (WIN != "")    sigscan(WIN)
+			if (CSRET != "")  sigscan(CSRET)
+			if (ANCHOR != "") sigscan(ANCHOR)
+		} else {
+			orrscan("72b2")
+			orrscan("1232")
+		}
+		sp += length(line)
+		L = length(buf)
+		if (L > K) { tail = substr(buf, L - K + 1) } else { tail = buf }
+	}
+	# A match is reported the moment its LAST byte lands in a line, so each
+	# one is seen exactly once and a line boundary can never split it: only
+	# starts at s0 or later can still be incomplete before this line.
+	function sigscan(pat,   pl, s0, region, base, e, p) {
+		pl = length(pat)
+		s0 = tlen - pl + 2
+		if (s0 < 1) s0 = 1
+		region = substr(buf, s0)
+		base = s0
+		while ((e = index(region, pat)) > 0) {
+			p = base + e - 1
+			printf "%d:%s\n", int(sp - tlen + p - 1), pat
+			region = substr(region, e + 1)
+			base = base + e
+		}
+	}
+	# The word is b0 b1 b2 b3 in memory; b2b3 is the fixed immediate and b1
+	# holds the only nibble the 0xFFFFFC00 mask leaves free - 00 / 01 / 02 /
+	# 03. tier_d re-reads the word and checks the mask properly; this is the
+	# cheap pre-filter, and it must stay a superset of it.
+	function orrscan(pat,   s0, region, base, e, p, g, b1) {
+		s0 = tlen - 2
+		if (s0 < 1) s0 = 1
+		region = substr(buf, s0)
+		base = s0
+		while ((e = index(region, pat)) > 0) {
+			p = base + e - 1
+			g = p - 4
+			if (g >= 1) {
+				b1 = substr(buf, g + 2, 2)
+				if (b1 == "00" || b1 == "01" || b1 == "02" || b1 == "03")
+					printf "%d:%s%s%s\n", int(sp - tlen + g - 1), substr(buf, g, 2), b1, pat
+			}
+			region = substr(region, e + 1)
+			base = base + e
+		}
+	}
+'
+hexscan() { # $1 = sig|orr  $2 = file
+	_hs_mode=$1
+	_hs_f=$2
+	# MF_NO_AWK is a test hook (never set by an installer) that exercises
+	# the fallback; without awk at all the same path keeps us safe.
+	if [ -z "${MF_NO_AWK:-}" ] && awk 'BEGIN { exit 0 }' </dev/null >/dev/null 2>&1; then
+		$NSPRE od -An -v -tx1 "$_hs_f" 2>/dev/null | awk \
+			-v mode="$_hs_mode" -v WIN="$WIN" -v CSRET="$CSRET" \
+			-v ANCHOR="$ANCHOR" "$HS_AWK"
+	elif [ "$_hs_mode" = sig ]; then
+		$NSPRE od -An -v -tx1 "$_hs_f" 2>/dev/null | tr -d ' \n' | \
+			grep -bo -E "$WIN|$CSRET|$ANCHOR"
+	else
+		$NSPRE od -An -v -tx1 "$_hs_f" 2>/dev/null | tr -d ' \n' | \
+			grep -bo -E '[0-9a-f]{2}0[0-3]72b2|[0-9a-f]{2}0[0-3]1232'
+	fi
+}
+
+ui_print "  Mirafix — 解决投屏 v1.3"
 ui_print "  ------------------------------------------------------------"
 ui_print "  Device identity / 设备身份"
 for _p in ro.product.model ro.product.device ro.build.version.release \
@@ -158,8 +251,7 @@ TD_OFF=0 TD_ORIG=0 TD_PATCH=0
 
 tier_d() { # $1 = pristine stock library ; 0 = exactly one pair found
 	_td_st=$1
-	_td_hex=$($NSPRE od -An -v -tx1 "$_td_st" 2>/dev/null | tr -d ' \n' | \
-		grep -bo -E '[0-9a-f]{2}0[0-3]72b2|[0-9a-f]{2}0[0-3]1232') || _td_hex=
+	_td_hex=$(hexscan orr "$_td_st") || _td_hex=
 	[ -n "$_td_hex" ] || return 1
 	_td_prev=
 	while IFS= read -r _td_ln; do
@@ -240,8 +332,7 @@ if [ "$W" = "$WIN" ] && [ -z "$MF_FORCE_TD" ]; then
 fi
 
 if [ -z "$GOT" ]; then
-	HITS=$($NSPRE od -An -v -tx1 "$TGT" 2>/dev/null | tr -d ' \n' | \
-		grep -bo -E "$WIN|$CSRET|$ANCHOR")
+	HITS=$(hexscan sig "$TGT")
 
 	# highest confidence = longest match
 	BEST=0
@@ -381,7 +472,7 @@ PAY_MD5=$(md5sum "$PAY" 2>/dev/null); PAY_MD5=${PAY_MD5%% *}
 
 # ---- 8. record the device identity for boot-time checks ---------
 {
-	echo "version=1.2"
+	echo "version=1.3"
 	echo "installed=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
 	echo "model=$(getprop ro.product.model 2>/dev/null)"
 	echo "device=$(getprop ro.product.device 2>/dev/null)"

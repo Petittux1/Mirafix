@@ -1,14 +1,18 @@
-# Mirafix v1.2 — 解决投屏 / Fix stock casting / Correction du miroir d'écran
+# Mirafix v1.3 — 解决投屏 / Fix stock casting / Correction du miroir d'écran
 
 > **先读这条 / Read this first / À lire d'abord**
 >
-> **v1.0 在部分机型上会导致开不了机（bootloop）。请直接用 v1.2，v1.0 / v1.1 都不要再装。**
-> **v1.0 could bootloop on some devices. Use v1.2; do not install v1.0 or v1.1 anymore.**
-> **v1.0 pouvait empêcher le démarrage sur certains appareils. Utilisez v1.2, n'installez plus v1.0 ni v1.1.**
+> **v1.0 在部分机型上会导致开不了机（bootloop）。请直接用 v1.3，v1.0 / v1.1 / v1.2 都不要再装。**
+> **v1.0 could bootloop on some devices. Use v1.3; do not install v1.0, v1.1 or v1.2 anymore.**
+> **v1.0 pouvait empêcher le démarrage sur certains appareils. Utilisez v1.3, n'installez plus v1.0, v1.1 ni v1.2.**
 >
-> **v1.1 本身是安全的**（签名不匹配就中止、绝不落地），但它只认字节，遇到编译器换了寄存器的构建（HyperOS 3）会装不上——v1.2 补上了这种情况。
-> **v1.1 was safe** (it aborts and installs nothing when the signature does not match), but it only matched bytes, so on a build where the compiler used different registers (HyperOS 3) it could not install — v1.2 handles that case.
-> **v1.1 était sûr** (il s'annule sans rien installer si la signature ne correspond pas), mais il ne comparait que des octets : sur un build où le compilateur a utilisé d'autres registres (HyperOS 3) il ne s'installait pas — v1.2 prend en charge ce cas.
+> **v1.2 有 bug**：定位扫描器用了 `grep -b`，而 BusyBox grep 根本没有这个选项——Magisk 的安装脚本以 `ASH_STANDALONE=1 busybox ash` 运行，所有命令都强制走 applet，于是每一台需要扫描的机器都会打印 `grep: invalid option -- b` 并以「signature not found」中止。**不伤机**（照旧安全中止、不留残模块），但等于没修。v1.3 改用 awk 扫描器。
+> **v1.2 had a bug**: its locator used `grep -b`, an option BusyBox grep does not have. Magisk runs installer scripts under `ASH_STANDALONE=1 busybox ash`, where every command is forced to a BusyBox applet, so any device that needed a scan printed `grep: invalid option -- b` and aborted with "signature not found". **Nothing was damaged** (it aborted safely and left no half-installed module), but nothing was fixed either. v1.3 uses an awk scanner instead.
+> **v1.2 avait un bug** : son localisateur utilisait `grep -b`, une option que BusyBox grep ne possède pas. Magisk exécute les scripts d'installation avec `ASH_STANDALONE=1 busybox ash`, où chaque commande est forcée vers une applet BusyBox : tout appareil nécessitant un scan affichait donc `grep: invalid option -- b` puis s'arrêtait avec « signature not found ». **Rien n'a été endommagé** (annulation sûre, aucun module à moitié installé), mais rien n'a été corrigé non plus. v1.3 utilise un scanner awk.
+>
+> **v1.1 本身是安全的**（签名不匹配就中止、绝不落地），但它只认字节，遇到编译器换了寄存器的构建（HyperOS 3）会装不上——v1.2 补上了这种情况，v1.3 让它在 Magisk 上真正跑得起来。
+> **v1.1 was safe** (it aborts and installs nothing when the signature does not match), but it only matched bytes, so on a build where the compiler used different registers (HyperOS 3) it could not install — v1.2 handles that case, and v1.3 makes it actually run under Magisk.
+> **v1.1 était sûr** (il s'annule sans rien installer si la signature ne correspond pas), mais il ne comparait que des octets : sur un build où le compilateur a utilisé d'autres registres (HyperOS 3) il ne s'installait pas — v1.2 prend en charge ce cas, v1.3 le fait réellement fonctionner sous Magisk.
 
 ---
 
@@ -66,6 +70,22 @@ v1.2 不再只认字节：
 
 **如果仍然中止**，中止信息里会打印 `orr #0x4000` 出现的位置和 `csel` 配对数，回报时把这段贴出来即可继续定位。
 
+### v1.3 修复：BusyBox 环境下的扫描器
+
+v1.2 的定位扫描器用的是 `grep -bo`（带字节偏移的 grep）。**BusyBox 的 grep 没有 `-b` 选项**，而 Magisk / KernelSU 都把安装脚本放在 `ASH_STANDALONE=1 busybox ash` 里跑——这种模式下**不管 `PATH` 怎么写**，`grep` 一律解析成 BusyBox 的 applet。于是扫描报 `grep: invalid option -- b`、拿不到任何命中，安装以「signature not found」中止。
+
+也就是说：**v1.2 在任何需要扫描的机器上都和 v1.1 一样装不上**，只是多打印一段 BusyBox 用法说明。快速路径本来就命中的机器不受影响（它不扫描）。
+
+v1.3 把两处扫描都换成 awk 实现：
+
+- BusyBox 一定带 `awk`，而 `awk` 原生就给得出字节偏移，不需要 `-b`；
+- 按 `od` 的**行**（16 字节）滚动，行尾用 `index()` 精确比对，**跨行边界的签名不会漏**；
+- 不用正则区间表达式 `{n,m}`——BusyBox awk 同样不支持。
+
+扫描结果对 `grep -b` 是**超集**（嵌在长签名里的短签名也会被报出来），而安装闸门真正读的只有两个数——最长命中长度和它的出现次数——两者完全一致，已逐项验证。超集反而更安全：`grep` 的「左最优先最长、不重叠」会**吞掉**压在非对齐候选下面的对齐候选，awk 不会。
+
+**自测**：新增 16 项**真实安装器环境**测试，用 `ASH_STANDALONE=1 busybox ash` 跑完整安装闸门，并**先证明该环境下 `grep -b` 确实不可用**；反向对照强制走旧的 grep 路径，必须失败。四套测试合计 74 项全绿（闸门 30 + 开机 15 + 扫描器 13 + 环境 16）。
+
 ### 已知触发源：HyperCeiler 的截屏开关
 
 这个 bug 不是必现的。最常见的触发源是 LSPosed 模块 **HyperCeiler（西米露）** 的「**允许在任何应用截屏**」（以及同类的 *disable flag secure* 设置）：它把 App 侧的 `FLAG_SECURE` 关了，但 `qtiSetOutputUsage` 仍然给输出 buffer 加 `GRALLOC_USAGE_PROTECTED`，于是 non-secure 编码器撞上 secure buffer → `qbuf -22` → `1008`。
@@ -75,10 +95,10 @@ v1.2 不再只认字节：
 
 ### 安装
 
-管理器 → 模块 → 本地安装 `Mirafix-v1.2.zip` → 重启
+管理器 → 模块 → 本地安装 `Mirafix-v1.3.zip` → 重启
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.3.zip
 reboot
 ```
 
@@ -160,6 +180,22 @@ The safety rails are unchanged: an install that cannot be confident aborts, the 
 
 **If it still aborts**, the message prints where `orr #0x4000` occurs and how many `csel` pairs were seen — paste that part when reporting.
 
+### Fixed in v1.3: the scanner under BusyBox
+
+v1.2's locator used `grep -bo` (grep with byte offsets). **BusyBox grep has no `-b` option**, and Magisk / KernelSU both run installer scripts under `ASH_STANDALONE=1 busybox ash`, where — **whatever `PATH` says** — `grep` resolves to the BusyBox applet. The scan therefore printed `grep: invalid option -- b`, produced no matches, and the install aborted with "signature not found".
+
+In other words: **v1.2 could not install on any device that needed a scan**, exactly like v1.1, only with a BusyBox usage dump attached. Devices whose build already matched the fast path were unaffected, because that path never scans.
+
+v1.3 replaces both scans with an awk implementation:
+
+- BusyBox always ships `awk`, and awk reports byte offsets natively — no `-b` needed;
+- the scan rolls along `od`'s **lines** (16 bytes) and compares the line tail with `index()`, so **a signature straddling a line boundary is never missed**;
+- no `{n,m}` regex intervals — BusyBox awk does not support those either.
+
+The awk result is a **superset** of what `grep -b` produced (a short signature nested inside a longer one is reported too), but the install gate only ever reads two numbers — the longest match length and how many times it occurs — and those are identical by construction and verified case by case. The superset is in fact safer: grep's leftmost-longest, non-overlapping rule **swallows** an aligned candidate that sits underneath an unaligned one, while awk does not.
+
+**Self-test:** 16 new tests run the full install gate inside a **reproduction of the real installer shell** (`ASH_STANDALONE=1 busybox ash`), and first **prove that `grep -b` really is unavailable there**; a negative control forces the old grep path and must fail. All four suites are green — 74 tests in total (30 gate + 15 boot + 13 scanner + 16 environment).
+
 ### Known trigger: HyperCeiler's screenshot switch
 
 The bug is not always reproducible. The most common trigger is the LSPosed module **HyperCeiler**, feature **"Allow screenshots in any app"** (and similar *disable flag secure* settings): it turns `FLAG_SECURE` off on the app side while `qtiSetOutputUsage` still ORs `GRALLOC_USAGE_PROTECTED` into the output buffer, so a non-secure encoder input meets a secure buffer → `qbuf -22` → `1008`.
@@ -169,10 +205,10 @@ The bug is not always reproducible. The most common trigger is the LSPosed modul
 
 ### Install
 
-Manager → Modules → Install from local → `Mirafix-v1.2.zip` → reboot
+Manager → Modules → Install from local → `Mirafix-v1.3.zip` → reboot
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.3.zip
 reboot
 ```
 
@@ -254,6 +290,22 @@ Les sécurités restent inchangées : une installation qui n'est pas sûre s'ann
 
 **Si l'annulation persiste**, le message indique où se trouve `orr #0x4000` et combien de paires `csel` ont été vues — collez cette partie en cas de signalement.
 
+### Corrigé en v1.3 : le scanner sous BusyBox
+
+Le localisateur de v1.2 utilisait `grep -bo` (grep avec décalages en octets). **BusyBox grep n'a pas l'option `-b`**, et Magisk / KernelSU exécutent tous les scripts d'installation avec `ASH_STANDALONE=1 busybox ash`, où — **quelle que soit la valeur de `PATH`** — `grep` est résolu vers l'applet BusyBox. Le scan affichait donc `grep: invalid option -- b`, ne renvoyait aucune correspondance, et l'installation s'arrêtait avec « signature not found ».
+
+Autrement dit : **v1.2 ne s'installait sur aucun appareil nécessitant un scan**, exactement comme v1.1, mais avec en plus le manque d'utilisation de BusyBox. Les appareils déjà compatibles avec le chemin rapide n'étaient pas affectés, puisque celui-ci ne scanne pas.
+
+v1.3 remplace les deux scans par une implémentation awk :
+
+- BusyBox embarque toujours `awk`, et awk donne nativement les décalages en octets — pas besoin de `-b` ;
+- le scan progresse **ligne par ligne** (`od`, 16 octets) et compare la fin de ligne avec `index()` : **un signature à cheval sur une frontière de ligne n'est jamais manquée** ;
+- pas d'intervalle regex `{n,m}` — BusyBox awk ne les gère pas non plus.
+
+Le résultat awk est un **surensemble** de ce que `grep -b` produisait (une courte signature imbriquée dans une plus longue est aussi rapportée), mais la barrière d'installation ne lit que deux nombres — la longueur de la plus longue correspondance et le nombre de fois où elle apparaît — et ils sont identiques par construction, vérifiés cas par cas. La surensemble est d'ailleurs plus sûre : la règle gauche-la-plus-longue non chevauchante de grep **avale** un candidat aligné placé sous un candidat non aligné, awk non.
+
+**Auto-test :** 16 nouveaux tests exécutent la barrière d'installation complète dans une **reproduction du shell d'installation réel** (`ASH_STANDALONE=1 busybox ash`), et commencent par **prouver que `grep -b` y est réellement indisponible** ; un contrôle négatif force l'ancien chemin grep et doit échouer. Les quatre suites sont vertes — 74 tests au total (30 barrière + 15 démarrage + 13 scanner + 16 environnement).
+
 ### Déclencheur connu : l'option capture d'écran d'HyperCeiler
 
 Le bug n'est pas toujours reproductible. Le déclencheur le plus fréquent est le module LSPosed **HyperCeiler**, fonction **« Autoriser la capture d'écran dans toutes les applications »** (et les options du type *désactiver FLAG_SECURE*) : elle coupe `FLAG_SECURE` côté application pendant que `qtiSetOutputUsage` continue d'ajouter `GRALLOC_USAGE_PROTECTED` au buffer de sortie — entrée d'encodeur non sécurisée contre buffer secure → `qbuf -22` → `1008`.
@@ -263,10 +315,10 @@ Le bug n'est pas toujours reproductible. Le déclencheur le plus fréquent est l
 
 ### Installation
 
-Gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.2.zip` → redémarrage
+Gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.3.zip` → redémarrage
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.3.zip
 reboot
 ```
 
@@ -300,7 +352,7 @@ reboot
 
 ### 📦 Fichier / Asset
 
-- `Mirafix-v1.2.zip` — 模块包，管理器直接安装 / module package, install it straight from the manager / paquet de module, à installer depuis le gestionnaire.
+- `Mirafix-v1.3.zip` — 模块包，管理器直接安装 / module package, install it straight from the manager / paquet de module, à installer depuis le gestionnaire.
 - Zip 里**不含任何预编译库**；载荷由安装脚本从本机库现场生成 / The zip ships **no pre-built library**; the payload is generated by the installer from the local one / L'archive **ne contient aucune bibliothèque précompilée** ; la charge utile est produite par l'installateur à partir de la locale.
 
 ### ✅ 要求 / Requirements / Prérequis
