@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # -----------------------------------------------------------------
-# Mirafix — 解决投屏  v1.1   install gate  (customize.sh)
+# Mirafix — 解决投屏  v1.2   install gate  (customize.sh)
 # Sourced by the Magisk / KernelSU installer.
 #
 # The payload is ALWAYS generated from THIS device's own
@@ -59,8 +59,9 @@ MI=/proc/self/mountinfo
 [ -n "$NSPRE" ] && MI=/proc/1/mountinfo
 
 # ---- 2. constants ------------------------------------------------
-# MF_TGT / MF_NO_PERMS are test hooks used by the offline unit tests;
-# they are never set by the Magisk / KernelSU installer.
+# MF_TGT / MF_NO_PERMS / MF_FORCE_TD are test hooks used by the offline unit
+# tests; they are never set by the Magisk / KernelSU installer.
+# MF_FORCE_TD skips the byte-window tiers so tier D can be exercised.
 TGT=${MF_TGT:-/system_ext/lib64/libsurfaceflinger.so}
 PAY="$MODPATH/system_ext/lib64/libsurfaceflinger.so"
 INFO="$MODPATH/build.info"
@@ -69,10 +70,40 @@ WIN=0b0172b25f01096a6011889ac0035fd6                      # orr|tst|csel|ret 16B
 CSRET=6011889ac0035fd6                                    # csel|ret           8B
 ANCHOR=6011889a                                           # csel               4B
 PATCHED=e00308aa
+# 4 bytes to write / 4 bytes to put back when proving the diff.
+# Tiers A-C always patch the well known csel; tier D (foreign builds)
+# overwrites both from the site it found.
+PATCH_HEX=$PATCHED
+ORIG_HEX=$ANCHOR
 
 rm -f "$MODPATH/unsupported" 2>/dev/null
 
-ui_print "  Mirafix — 解决投屏 v1.1"
+# ---- 2b. small helpers --------------------------------------------
+# hex string (as od prints it, byte order preserved) -> u32 value
+hex2u32() { # $1 = 8 hex chars
+	echo $((0x${1:6:2}${1:4:2}${1:2:2}${1:0:2}))
+}
+# u32 value -> 8 hex chars in od byte order
+u32hex() { # $1 = decimal u32
+	printf '%08x' "$1" | sed 's/\(..\)\(..\)\(..\)\(..\)/\4\3\2\1/'
+}
+# u32 value -> 4 raw bytes
+u32bytes() { # $1 = decimal u32
+	printf "\\$(printf '%03o' $(( $1        & 255 )))\\$(printf '%03o' $(( ($1 >> 8)  & 255 )))\\$(printf '%03o' $(( ($1 >> 16) & 255 )))\\$(printf '%03o' $(( ($1 >> 24) & 255 )))"
+}
+# hex string in od byte order -> the raw bytes it describes
+hexbytes() { # $1 = hex string (even length)
+	_hb=$1
+	_fmt=
+	while [ -n "$_hb" ]; do
+		_fmt="$_fmt\\$(printf '%03o' $((0x${_hb:0:2})))"
+		_hb=${_hb:2}
+	done
+	[ -n "$_fmt" ] && printf "$_fmt"
+	return 0
+}
+
+ui_print "  Mirafix — 解决投屏 v1.2"
 ui_print "  ------------------------------------------------------------"
 ui_print "  Device identity / 设备身份"
 for _p in ro.product.model ro.product.device ro.build.version.release \
@@ -105,19 +136,112 @@ STOCK_SIZE=$($NSPRE stat -c %s "$TGT" 2>/dev/null)
 ui_print "       stock md5  = $STOCK_MD5"
 ui_print "       stock size = $STOCK_SIZE"
 
+# ---- 2c. tier D: register agnostic locator ----------------------
+# Tiers A-C look for one exact byte window. A different compiler release
+# allocates different registers and all three miss (this is what happened
+# on HyperOS 3 / Android 16, where the build aborted safely instead of
+# bootlooping). Tier D keys on the shape of the code instead:
+#
+#     orr  Ra, Rb, #0x4000     ; Ra = usage | GRALLOC_USAGE_PROTECTED
+#     ...                      ; at most 7 instructions later
+#     csel Rd, Ra, Rb, cond     ; pick between protected and clean usage
+#
+# `#0x4000` is GRALLOC_USAGE_PROTECTED, a fixed HAL constant, so the ORR
+# encodes identically in every build - and tiers A-C only ever rewrite the
+# csel, so this anchor survives even a previously patched file.
+# Requiring the csel's two sources to be exactly {Ra,Rb} is the tight part:
+# our library holds two `orr ?,?,#0x4000` but only one of them feeds a csel.
+# Exactly one (orr,csel) pair must exist anywhere, otherwise we abort.
+# The patch itself is derived from what we found: keep the clean source Rb.
+TD_ORR_N=0 TD_PAIR_N=0 TD_ORR_AT=
+TD_OFF=0 TD_ORIG=0 TD_PATCH=0
+
+tier_d() { # $1 = pristine stock library ; 0 = exactly one pair found
+	_td_st=$1
+	_td_hex=$($NSPRE od -An -v -tx1 "$_td_st" 2>/dev/null | tr -d ' \n' | \
+		grep -bo -E '[0-9a-f]{2}0[0-3]72b2|[0-9a-f]{2}0[0-3]1232') || _td_hex=
+	[ -n "$_td_hex" ] || return 1
+	_td_prev=
+	while IFS= read -r _td_ln; do
+		[ -z "$_td_ln" ] && continue
+		_td_h=${_td_ln%%:*}
+		case $_td_h in
+			''|*[!0-9]*) _td_h=${_td_ln%:*}; _td_h=${_td_h##*:} ;;
+		esac
+		_td_o=$((_td_h / 2))
+		[ $((_td_o % 4)) -eq 0 ] || continue
+		[ "$_td_o" = "$_td_prev" ] && continue
+		# regex is only a pre-filter: confirm the exact logical-immediate encoding
+		_td_w=$(hex2u32 "$($NSPRE dd if="$_td_st" bs=1 skip=$_td_o count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')")
+		if [ $((_td_w & 0xFFFFFC00)) -eq $((0xB2720000)) ]; then
+			_td_sf=64
+		elif [ $((_td_w & 0xFFFFFC00)) -eq $((0x32120000)) ]; then
+			_td_sf=32
+		else
+			continue
+		fi
+		_td_prev=$_td_o
+		_td_ra=$((_td_w & 31))
+		_td_rb=$((_td_w >> 5 & 31))
+		TD_ORR_N=$((TD_ORR_N + 1))
+		TD_ORR_AT="$TD_ORR_AT $_td_o"
+		[ "$_td_ra" -eq "$_td_rb" ] && continue     # orr x8,x8,#.. is a dead shape
+		_td_ctx=$($NSPRE dd if="$_td_st" bs=1 skip=$((_td_o + 4)) count=32 2>/dev/null | od -An -tx1 | tr -d ' \n')
+		_td_i=0
+		while [ $_td_i -lt 64 ]; do
+			_td_s=${_td_ctx:$_td_i:8}
+			[ ${#_td_s} -eq 8 ] || break
+			_td_cw=$(hex2u32 "$_td_s")
+			_td_ok=0
+			if [ "$_td_sf" -eq 64 ] && [ $((_td_cw & 0xFFE00C00)) -eq $((0x9A800000)) ]; then
+				_td_ok=1
+			elif [ "$_td_sf" -eq 32 ] && [ $((_td_cw & 0xFFE00C00)) -eq $((0x1A800000)) ]; then
+				_td_ok=1
+			fi
+			if [ "$_td_ok" -eq 1 ]; then
+				_td_rd=$((_td_cw & 31))
+				_td_rn=$((_td_cw >> 5 & 31))
+				_td_rm=$((_td_cw >> 16 & 31))
+				if { [ "$_td_rn" -eq "$_td_ra" ] && [ "$_td_rm" -eq "$_td_rb" ]; } ||
+				   { [ "$_td_rn" -eq "$_td_rb" ] && [ "$_td_rm" -eq "$_td_ra" ]; }; then
+					TD_PAIR_N=$((TD_PAIR_N + 1))
+					TD_OFF=$((_td_o + 4 + _td_i / 2))
+					TD_ORIG=$_td_cw
+					if [ "$_td_sf" -eq 64 ]; then
+						TD_PATCH=$((0xAA0003E0 | (_td_rb << 16) | _td_rd))
+					else
+						TD_PATCH=$((0x2A0003E0 | (_td_rb << 16) | _td_rd))
+					fi
+				fi
+			fi
+			_td_i=$((_td_i + 8))
+		done
+	done <<EOF
+$_td_hex
+EOF
+	[ "$TD_PAIR_N" -eq 1 ]
+}
+
 # ---- 4. locate the target instruction ---------------------------
 ui_print "  [2/5] locate target instruction"
 OFF=
+TIER=
+GOT=
 W=$($NSPRE dd if="$TGT" bs=1 skip=6003616 count=16 2>/dev/null | od -An -tx1 | tr -d ' \n')
 SIGLEN=
-if [ "$W" = "$WIN" ]; then
+AC_N=0
+AC_BEST=0
+if [ "$W" = "$WIN" ] && [ -z "$MF_FORCE_TD" ]; then
 	OFF=$KNOWN
 	SIGLEN=32
+	TIER=a
+	GOT=1
 	ui_print "       fast path hit at offset $OFF (0x5b9ba8)"
-else
+fi
+
+if [ -z "$GOT" ]; then
 	HITS=$($NSPRE od -An -v -tx1 "$TGT" 2>/dev/null | tr -d ' \n' | \
 		grep -bo -E "$WIN|$CSRET|$ANCHOR")
-	[ -n "$HITS" ] || fail "signature not found in this build (md5=$STOCK_MD5) - unsupported"
 
 	# highest confidence = longest match
 	BEST=0
@@ -151,9 +275,49 @@ EOF
 $HITS
 EOF
 
-	[ "$N" -eq 1 ] || fail "signature matched $N places (len=$BEST) - too ambiguous, aborted"
-	SIGLEN=$BEST
-	ui_print "       scanned: best match ${BEST} hex chars, unique -> offset $OFF"
+	AC_N=$N
+	AC_BEST=$BEST
+	if [ "$N" -eq 1 ]; then
+		SIGLEN=$BEST
+		case $BEST in
+			32) TIER=a ;;
+			16) TIER=b ;;
+			*)  TIER=c ;;
+		esac
+		# A 16-byte window or csel|ret is hard evidence. A bare 4-byte
+		# anchor is not: there are hundreds of `csel x0,?` in a real
+		# library, so a lone one may well be an accident - it only wins
+		# if tier D turns up nothing better.
+		if [ "$BEST" -ge 16 ] && [ -z "$MF_FORCE_TD" ]; then
+			GOT=1
+			ui_print "       scanned: best match ${BEST} hex chars, unique -> offset $OFF"
+		fi
+	else
+		OFF=
+	fi
+fi
+
+# Tiers A-C need the exact bytes; a different compiler release allocates
+# different registers and all three miss (this is what HyperOS 3 / Android 16
+# does, where v1.1 aborted safely instead of bootlooping). Tier D keys on the
+# shape of the code instead and runs whenever the byte evidence is weak.
+if [ -z "$GOT" ]; then
+	ui_print "       exact byte match weak or absent, trying semantic locator (tier D)"
+	if tier_d "$TGT"; then
+		OFF=$TD_OFF
+		ORIG_HEX=$(u32hex "$TD_ORIG")
+		PATCH_HEX=$(u32hex "$TD_PATCH")
+		SIGLEN=8
+		TIER=d
+		GOT=1
+		ui_print "       tier D: 'orr ?,?,#0x4000' -> csel pair unique, offset $OFF"
+		ui_print "               orig=$ORIG_HEX patch=$PATCH_HEX"
+	elif [ "$AC_N" -eq 1 ] && [ -z "$MF_FORCE_TD" ]; then
+		GOT=1
+		ui_print "       tier D inconclusive, using the unique csel anchor at offset $OFF"
+	else
+		fail "signature not found in this build (md5=$STOCK_MD5, exact csel anchors=$AC_N len=$AC_BEST; tier D 'orr #0x4000' sites=$TD_ORR_N at:$TD_ORR_AT, csel pairs=$TD_PAIR_N) - unsupported"
+	fi
 fi
 
 [ -n "$OFF" ] || fail "failed to compute patch offset"
@@ -165,16 +329,16 @@ mkdir -p "${PAY%/*}" 2>/dev/null
 rm -f "$PAY" 2>/dev/null
 cp "$TGT" "$PAY" 2>/dev/null || fail "cannot copy the stock library"
 
-printf '\340\003\010\252' | dd of="$PAY" bs=1 seek="$OFF" conv=notrunc 2>/dev/null
+hexbytes "$PATCH_HEX" | dd of="$PAY" bs=1 seek="$OFF" conv=notrunc 2>/dev/null
 B=$(dd if="$PAY" bs=1 skip="$OFF" count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
-[ "$B" = "$PATCHED" ] || fail "patch write verify failed (got $B)"
+[ "$B" = "$PATCH_HEX" ] || fail "patch write verify failed (got $B, want $PATCH_HEX)"
 
 # ---- 6. prove that ONLY those 4 bytes changed -------------------
 ui_print "  [4/5] prove change is exactly 4 bytes"
 V="$MODPATH/.mf_verify"
 rm -f "$V" 2>/dev/null
 cp "$PAY" "$V" 2>/dev/null || fail "verify copy failed"
-printf '\140\021\210\232' | dd of="$V" bs=1 seek="$OFF" conv=notrunc 2>/dev/null
+hexbytes "$ORIG_HEX" | dd of="$V" bs=1 seek="$OFF" conv=notrunc 2>/dev/null
 VM=$(md5sum "$V" 2>/dev/null); VM=${VM%% *}
 rm -f "$V" 2>/dev/null
 [ "$VM" = "$STOCK_MD5" ] || fail "payload differs from stock outside the 4 patched bytes"
@@ -217,7 +381,7 @@ PAY_MD5=$(md5sum "$PAY" 2>/dev/null); PAY_MD5=${PAY_MD5%% *}
 
 # ---- 8. record the device identity for boot-time checks ---------
 {
-	echo "version=1.1"
+	echo "version=1.2"
 	echo "installed=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
 	echo "model=$(getprop ro.product.model 2>/dev/null)"
 	echo "device=$(getprop ro.product.device 2>/dev/null)"
@@ -232,6 +396,9 @@ PAY_MD5=$(md5sum "$PAY" 2>/dev/null); PAY_MD5=${PAY_MD5%% *}
 	echo "payload_md5=$PAY_MD5"
 	echo "offset=$OFF"
 	echo "signature_len=$SIGLEN"
+	echo "tier=${TIER:-a}"
+	echo "patch_hex=$PATCH_HEX"
+	echo "orig_hex=$ORIG_HEX"
 } > "$INFO" 2>/dev/null
 [ -f "$INFO" ] || fail "cannot write build.info"
 

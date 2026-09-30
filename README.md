@@ -6,7 +6,7 @@
 Fixes **stock** Miracast / WFD casting from Xiaomi / HyperOS to **non-Xiaomi displays**.
 Corrige le miroir d'écran **d'origine** (Miracast / WFD) de Xiaomi / HyperOS vers un **écran non Xiaomi**.
 
-**当前版本 / Current release: `v1.1`**
+**当前版本 / Current release: `v1.2`**
 
 ---
 
@@ -66,20 +66,28 @@ setCurWfdErrorCode=1008
 
 - **root**：Magisk（官方 / Alpha）、KernelSU、ReZukisu。挂载由脚本接管（`skip_mount`），三套 root 走同一套逻辑。
 - **机型 / 系统**：面向**所有澎湃（HyperOS）系统**的设备设计，不靠机型白名单。
-- 安装时模块会**读取本机自己的 `libsurfaceflinger.so`**，在现场定位目标指令（16 字节窗口 → 8 字节 `csel+ret` → 4 字节 `csel` 三级匹配，**必须唯一命中**），然后生成补丁载荷。
-  - 命中 → 生成载荷，校验通过后安装成功，重启生效。
-  - **0 命中 / 命中不唯一 / 读不到原版 → 安装直接中止**，模块不会留在手机上，开机与出厂状态无异。
+- 安装时模块会**读取本机自己的 `libsurfaceflinger.so`**，按证据强度逐级定位目标指令，**任何一级都必须唯一命中**：
+
+  | 级别 | 依据 | 何时用 |
+  |---|---|---|
+  | 快速通道 | 16 字节窗口（`orr`/`tst`/`csel`/`ret`）正好在已知偏移 | 与首发机型同一份编译产物 |
+  | A · B | 16 字节窗口 / 8 字节 `csel+ret`，全库扫描 | 同款代码、偏移变了 |
+  | **D（语义匹配）** | `orr ?,?,#0x4000` 之后 8 条指令内出现 `csel`，且该 `csel` 的两个源寄存器**恰好就是**这个 `orr` 的 `Ra` / `Rb` | **换了编译器或系统版本、寄存器分配不同**时（例如 HyperOS 3 / Android 16 就是这样，A·B 三级全落空） |
+  | C（裸锚点） | 单独一条 4 字节 `csel` | 弱证据，**只有 D 也没结果时才用** |
+
+  - 命中 → 生成载荷（补丁字节由命中现场推导，不是写死的），校验通过后安装成功，重启生效。
+  - **0 命中 / 命中不唯一 / 读不到原版 → 安装直接中止**，模块不会留在手机上，开机与出厂状态无异。中止信息会打印 `orr #0x4000` 的位置和 `csel` 配对数，回报时直接贴这段就能定位。
 - 只改系统侧，**不改投影接收端、不装任何第三方投屏 App**。
 - 模块自带**身份指纹**（机型 + `ro.build.fingerprint`）。OTA 升级后身份对不上会**自动禁用**并写日志，需要重新安装——不会拿旧系统的载荷去碰新系统。
 
 ### 安装
 
-方式一（推荐）：管理器 → 模块 → 从本地安装 `Mirafix-v1.1.zip` → 重启。
+方式一（推荐）：管理器 → 模块 → 从本地安装 `Mirafix-v1.2.zip` → 重启。
 
 方式二：命令行
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
 reboot
 ```
 
@@ -131,7 +139,7 @@ zip 里**不带任何预编译二进制**，载荷是安装时从本机库现场
 2. Magisk：安全模式下 Magisk 会停用所有模块；KernelSU / ReZukisu 检测到 `ro.sys.safemode` 后会跳过所有模块脚本并禁用模块。
 3. 进系统后在管理器里移除或禁用 Mirafix，再正常重启。
 
-正常情况下**用不到这一步**：v1.1 的 `skip_mount` + 闸门脚本任何异常都只做一件事——不挂载、用原版库开机。
+正常情况下**用不到这一步**：v1.2 的 `skip_mount` + 闸门脚本任何异常都只做一件事——不挂载、用原版库开机。
 
 ### 卸载 / 回滚
 
@@ -207,20 +215,28 @@ Net effect: output buffers never carry `0x4000`, they stay non-secure, and the e
 
 - **Root:** Magisk (official / Alpha), KernelSU, ReZukisu. Mounting is script-driven (`skip_mount`), so all three behave the same way.
 - **Device / OS:** designed for **every HyperOS (澎湃) device** — no model whitelist.
-- At install time the module **reads this device's own `libsurfaceflinger.so`** and locates the target instruction on the spot (16-byte window → 8-byte `csel+ret` → 4-byte `csel`, three tiers, and it **must match exactly once**), then builds the payload:
-  - matched → payload generated and verified, install succeeds, effective after reboot;
-  - **0 matches / more than one match / pristine file unreadable → the install aborts** and the module is never left on the phone, so the phone boots exactly as it did from the factory.
+- At install time the module **reads this device's own `libsurfaceflinger.so`** and locates the target instruction by decreasing strength of evidence — **every tier must match exactly once**:
+
+  | Tier | Evidence | Used when |
+  |---|---|---|
+  | Fast path | the 16-byte window (`orr`/`tst`/`csel`/`ret`) sits at the known offset | same build as the launch device |
+  | A · B | 16-byte window / 8-byte `csel+ret`, full-file scan | same code, moved offset |
+  | **D (semantic)** | an `orr ?,?,#0x4000` followed within 8 instructions by a `csel` whose two source registers are **exactly** that `orr`'s `Ra` / `Rb` | **a different compiler or OS release allocated different registers** — HyperOS 3 / Android 16 is precisely this case, where every byte tier missed |
+  | C (bare anchor) | a lone 4-byte `csel` | weakest evidence, **only used when D finds nothing either** |
+
+  - matched → payload built from those very bytes (the patch bytes are derived on the spot, not hard-coded) and verified; install succeeds, effective after reboot;
+  - **0 matches / more than one match / pristine file unreadable → the install aborts** and the module is never left on the phone, so the phone boots exactly as it did from the factory. The abort message prints where `orr #0x4000` occurs and how many `csel` pairs were seen — paste that when reporting.
 - System side only — **the sink is untouched, no third-party casting app is used**.
 - The module records an **identity fingerprint** (model + `ro.build.fingerprint`). After an OTA the identity no longer matches, so the module **disables itself** and writes a log line — it will never push a payload built for the old system onto a new one.
 
 ### Install
 
-Recommended: manager → Modules → Install from local → `Mirafix-v1.1.zip` → reboot.
+Recommended: manager → Modules → Install from local → `Mirafix-v1.2.zip` → reboot.
 
 Or from a shell:
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
 reboot
 ```
 
@@ -272,7 +288,7 @@ Enter **safe mode** so no module loads:
 2. Magisk disables all modules in safe mode; KernelSU / ReZukisu detects `ro.sys.safemode` and skips every module script while disabling all modules.
 3. Remove or disable Mirafix in the manager, then reboot normally.
 
-You should not need this with v1.1: `skip_mount` plus the gate scripts mean that **any** failure results in nothing being mounted and the phone booting with the stock library.
+You should not need this with v1.2: `skip_mount` plus the gate scripts mean that **any** failure results in nothing being mounted and the phone booting with the stock library.
 
 ### Uninstall / rollback
 
@@ -348,20 +364,28 @@ Résultat : les buffers de sortie ne portent plus `0x4000`, restent non sécuris
 
 - **Root :** Magisk (officiel / Alpha), KernelSU, ReZukisu. Le montage est piloté par les scripts (`skip_mount`), donc les trois se comportent de la même manière.
 - **Appareil / système :** conçu pour **tous les appareils HyperOS (澎湃)** — aucune liste blanche de modèles.
-- Au moment de l'installation, le module **lit la bibliothèque `libsurfaceflinger.so` de l'appareil** et y localise la cible sur place (fenêtre de 16 octets → `csel+ret` de 8 octets → `csel` de 4 octets, trois niveaux, et le résultat doit être **unique**), puis construit la charge utile :
-  - trouvé → charge utile générée et vérifiée, installation réussie, actif après redémarrage ;
-  - **0 occurrence / plusieurs occurrences / fichier d'origine illisible → l'installation est annulée** et le module n'est jamais laissé sur le téléphone : celui-ci démarre exactement comme en usine.
+- Au moment de l'installation, le module **lit la bibliothèque `libsurfaceflinger.so` de l'appareil** et y localise la cible en suivant un ordre de preuve décroissant — **chaque niveau doit correspondre une seule fois** :
+
+  | Niveau | Preuve | Utilisé quand |
+  |---|---|---|
+  | Accès rapide | la fenêtre de 16 octets (`orr`/`tst`/`csel`/`ret`) est à l'offset connu | même build que l'appareil de lancement |
+  | A · B | fenêtre de 16 octets / `csel+ret` de 8 octets, balayage complet du fichier | même code, offset déplacé |
+  | **D (sémantique)** | un `orr ?,?,#0x4000` suivi dans les 8 instructions d'un `csel` dont les deux registres sources sont **exactement** le `Ra` / `Rb` de ce `orr` | **un autre compilateur ou une autre version du système a réattribué les registres** — HyperOS 3 / Android 16 est exactement ce cas, où tous les niveaux par octets échouent |
+  | C (ancre seule) | un unique `csel` de 4 octets | preuve la plus faible, **utilisé seulement si D ne trouve rien non plus** |
+
+  - trouvé → charge utile construite à partir de ces octets (les octets du correctif sont dérivés sur place, pas codés en dur) et vérifiée ; installation réussie, actif après redémarrage ;
+  - **0 occurrence / plusieurs occurrences / fichier d'origine illisible → l'installation est annulée** et le module n'est jamais laissé sur le téléphone : celui-ci démarre exactement comme en usine. Le message d'annulation indique où se trouve `orr #0x4000` et combien de paires `csel` ont été vues — collez-le en cas de signalement.
 - Côté système uniquement — **le récepteur n'est pas modifié, aucune application de projection tierce**.
 - Le module enregistre une **empreinte d'identité** (modèle + `ro.build.fingerprint`). Après une OTA l'identité ne correspond plus : le module **se désactive tout seul** et écrit une ligne de log — il ne poussera jamais une charge utile construite pour l'ancien système sur le nouveau.
 
 ### Installation
 
-Recommandé : gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.1.zip` → redémarrage.
+Recommandé : gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.2.zip` → redémarrage.
 
 Ou en ligne de commande :
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
 reboot
 ```
 
@@ -413,7 +437,7 @@ Entrez en **mode de sécurité** pour qu'aucun module ne se charge :
 2. Magisk désactive tous les modules en mode de sécurité ; KernelSU / ReZukisu détecte `ro.sys.safemode`, ignore tous les scripts de modules et les désactive.
 3. Supprimez ou désactivez Mirafix dans le gestionnaire, puis redémarrez normalement.
 
-Avec v1.1 vous ne devriez pas en avoir besoin : `skip_mount` et les scripts de barrière font que **la moindre anomalie** se traduit par rien de monté et un démarrage sur la bibliothèque d'origine.
+Avec v1.2 vous ne devriez pas en avoir besoin : `skip_mount` et les scripts de barrière font que **la moindre anomalie** se traduit par rien de monté et un démarrage sur la bibliothèque d'origine.
 
 ### Désinstallation / retour arrière
 

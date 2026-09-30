@@ -76,7 +76,11 @@ else
 	B=$(dd if="$TGT" bs=1 skip="${OFF:-0}" count=4 2>/dev/null |
 		od -An -tx1 | tr -d ' \n')
 fi
-echo "  bytes@$OFF = ${B:-unreadable}   (patched = e00308aa)"
+PH=$(sed -n 's/^patch_hex=//p' "$INFO" 2>/dev/null | head -n 1)
+[ -n "$PH" ] || PH=e00308aa
+echo "  bytes@$OFF = ${B:-unreadable}   (patched = $PH)"
+[ -n "$B" ] && [ "$B" = "$PH" ] && echo "  ✓ bytes match what the installer wrote" ||
+	echo "  ! bytes do NOT match what the installer wrote"
 echo "  stock md5 = $(sed -n 's/^stock_md5=//p' "$INFO" 2>/dev/null)"
 grep " $TGT " /proc/1/mountinfo 2>/dev/null | sed 's/^/  mountinfo: /' || \
 	echo "  mountinfo: (no mount on the target file)"

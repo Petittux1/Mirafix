@@ -98,6 +98,10 @@ WANT_FP=$(k fingerprint)
 WANT_MODEL=$(k model)
 WANT_OFF=$(k offset)
 WANT_MD5=$(k payload_md5)
+# tier D installs write different bytes than the classic window; they tell
+# us what to expect so the runtime check stays exact.
+_kp=$(k patch_hex)
+[ -n "$_kp" ] && PATCHED=$_kp
 
 [ -n "$WANT_OFF" ] || { say "build.info 缺少 offset，跳过"; set_state skipped; exit 0; }
 

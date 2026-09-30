@@ -1,10 +1,14 @@
-# Mirafix v1.1 — 解决投屏 / Fix stock casting / Correction du miroir d'écran
+# Mirafix v1.2 — 解决投屏 / Fix stock casting / Correction du miroir d'écran
 
 > **先读这条 / Read this first / À lire d'abord**
 >
-> **v1.0 在部分机型上会导致开不了机（bootloop）。v1.1 已经彻底重构，请勿再使用 v1.0。**
-> **v1.0 could bootloop on some devices. v1.1 is a full rework — do not use v1.0 anymore.**
-> **v1.0 pouvait empêcher le démarrage sur certains appareils. v1.1 est une refonte complète — n'utilisez plus v1.0.**
+> **v1.0 在部分机型上会导致开不了机（bootloop）。请直接用 v1.2，v1.0 / v1.1 都不要再装。**
+> **v1.0 could bootloop on some devices. Use v1.2; do not install v1.0 or v1.1 anymore.**
+> **v1.0 pouvait empêcher le démarrage sur certains appareils. Utilisez v1.2, n'installez plus v1.0 ni v1.1.**
+>
+> **v1.1 本身是安全的**（签名不匹配就中止、绝不落地），但它只认字节，遇到编译器换了寄存器的构建（HyperOS 3）会装不上——v1.2 补上了这种情况。
+> **v1.1 was safe** (it aborts and installs nothing when the signature does not match), but it only matched bytes, so on a build where the compiler used different registers (HyperOS 3) it could not install — v1.2 handles that case.
+> **v1.1 était sûr** (il s'annule sans rien installer si la signature ne correspond pas), mais il ne comparait que des octets : sur un build où le compilateur a utilisé d'autres registres (HyperOS 3) il ne s'installait pas — v1.2 prend en charge ce cas.
 
 ---
 
@@ -29,19 +33,38 @@ v1.1 换掉了整个思路：**zip 里不含任何二进制**，安装时读取*
 | OTA 之后 | 可能拿旧载荷碰新系统 | **身份指纹对不上 → 自动禁用并写日志**，需要重装 |
 | 诊断 | 需要终端看日志 | 管理器里 **Action** 按钮直接输出诊断 |
 
-**为什么它能适配所有澎湃系统的设备**：不是靠机型白名单，而是每次安装都从这台机器**自己的** `libsurfaceflinger.so` 里找那段指令——
+**为什么它能适配所有澎湃系统的设备**：不是靠机型白名单，而是每次安装都从这台机器**自己的** `libsurfaceflinger.so` 里找那段指令，按证据强度逐级尝试，**每一级都必须全库唯一命中**：
 
-1. 优先 16 字节指令窗口（`orr|tst|csel|ret`）
-2. 找不到就退到 8 字节（`csel|ret`）
-3. 再不行退到 4 字节 `csel`，但**必须全库唯一命中**
+1. 16 字节指令窗口（`orr|tst|csel|ret`）
+2. 8 字节（`csel|ret`）
+3. **语义匹配（v1.2 新增）** —— 见下
+4. 最后才用 4 字节 `csel` 裸锚点（弱证据）
 
 命中不唯一或根本找不到 → `abort`，模块不安装。**宁可不修，也不拿不确定的东西去碰系统库。**
 
-补丁本身没变，还是那 4 个字节：
+补丁本身没变，对普通机型还是那 4 个字节：
 
 | 文件 | 偏移 | 修改前 | 修改后 |
 |---|---|---|---|
 | `libsurfaceflinger.so` | `0x5b9ba8` | `csel x0,x11,x8,ne` (`6011889a`) | `mov x0,x8` (`e00308aa`) |
+
+换了编译器的构建里寄存器不同、偏移也不同，此时**补丁字节由命中现场推导**（`mov x{csel 目标}, x{干净来源}`），效果与上表完全等价。
+
+### v1.2 新增：语义匹配定位器
+
+有测试者在 **Xiaomi 17（`pudding`，HyperOS 3 / Android 16）** 上装 v1.1：三级字节签名**全部 0 命中**，安装被安全中止——手机照常开机，但投屏也没修成。原因很直接：那台机器的编译器给同一段代码分配了**不同的寄存器**，`6011889a` 这条指令在它的库里根本不存在（原版库 11.2 MB，与首发机型的 14.2 MB 也不是同一份编译产物）。
+
+v1.2 不再只认字节：
+
+- 先按**语义**找 `orr ?,?,#0x4000` —— `GRALLOC_USAGE_PROTECTED` 是固定的 HAL 常量 `0x4000`，任何编译器都会把它编成这一条立即数 `ORR`，**编码与寄存器分配无关**；
+- 再要求 8 条指令内出现一个 `csel`，且它的两个源寄存器**恰好是这个 `orr` 的 `Ra` 和 `Rb`**——也就是「在 `usage|PROTECTED` 和 `usage` 之间二选一」这一步本身；
+- 全库**唯一命中**才继续，命中 0 次或 2 次照样 `abort`。`orr x8,x8,#0x4000` 这种两个操作数相同的死形态直接排除（本机 14 MB 的库里就有 2 处 `orr #0x4000`，只有一处符合）。
+
+安全兜底不变：装不上就中止、开机闸门逐层校验、连败 2 次自动禁用。
+
+**自测**：强制走语义匹配重建的载荷，与实测可用的载荷**逐字节相同**（md5 `5ca0159e206fb93179b008aaa86e37d1`），并分别用 **busybox** 与 **toybox** 两套工具链跑通；30 项安装闸门测试 + 15 项开机脚本测试全绿。
+
+**如果仍然中止**，中止信息里会打印 `orr #0x4000` 出现的位置和 `csel` 配对数，回报时把这段贴出来即可继续定位。
 
 ### 已知触发源：HyperCeiler 的截屏开关
 
@@ -52,10 +75,10 @@ v1.1 换掉了整个思路：**zip 里不含任何二进制**，安装时读取*
 
 ### 安装
 
-管理器 → 模块 → 本地安装 `Mirafix-v1.1.zip` → 重启
+管理器 → 模块 → 本地安装 `Mirafix-v1.2.zip` → 重启
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
 reboot
 ```
 
@@ -104,19 +127,38 @@ v1.1 inverts the whole approach: **the zip contains no binary at all**; the payl
 | After an OTA | could push the old payload onto a new system | **identity mismatch → auto-disable + log**, reinstall required |
 | Diagnostics | needed a terminal to read the log | one tap on **Action** in the manager |
 
-**Why this targets every HyperOS (澎湃) device**: not through a model whitelist, but by locating the instruction in **this device's own** `libsurfaceflinger.so` on every install —
+**Why this targets every HyperOS (澎湃) device**: not through a model whitelist, but by locating the instruction in **this device's own** `libsurfaceflinger.so` on every install, trying the tiers in decreasing order of evidence — **each tier must match exactly once**:
 
 1. 16-byte instruction window first (`orr|tst|csel|ret`),
-2. fall back to 8 bytes (`csel|ret`),
-3. then to the bare 4-byte `csel`, but it **must be unique in the whole library**.
+2. then 8 bytes (`csel|ret`),
+3. **the semantic matcher (new in v1.2)** — see below,
+4. only then the bare 4-byte `csel` (weakest evidence).
 
 No match, or an ambiguous one → `abort`, nothing is installed. **Better to leave the bug alone than to touch a system library with something unverified.**
 
-The patch itself is unchanged — those 4 bytes:
+The patch itself is unchanged for ordinary builds — those 4 bytes:
 
 | File | Offset | Before | After |
 |---|---|---|---|
 | `libsurfaceflinger.so` | `0x5b9ba8` | `csel x0,x11,x8,ne` (`6011889a`) | `mov x0,x8` (`e00308aa`) |
+
+On a build produced by a different compiler the registers and the offset differ; there the **patch bytes are derived from what was actually found** (`mov x{csel dst}, x{clean source}`), which is exactly equivalent to the table above.
+
+### New in v1.2: the semantic locator
+
+A tester on **Xiaomi 17 (`pudding`, HyperOS 3 / Android 16)** installed v1.1: all three byte tiers found **0 matches** and the install aborted safely — the phone booted normally, but the cast bug stayed. The reason is simple: that build's compiler allocated **different registers** for the same code, so the instruction `6011889a` does not exist anywhere in its library (its stock library is 11.2 MB, not the same compile artifact as the 14.2 MB one).
+
+v1.2 no longer relies on bytes alone:
+
+- it first looks **semantically** for `orr ?,?,#0x4000` — `GRALLOC_USAGE_PROTECTED` is the fixed HAL constant `0x4000`, and every compiler encodes it as this single immediate `ORR`, independently of register allocation;
+- it then requires a `csel` within the next 8 instructions whose two source registers are **exactly that `orr`'s `Ra` and `Rb`** — i.e. the "choose between `usage|PROTECTED` and `usage`" step itself;
+- it must be **unique in the whole library**; 0 matches or 2 matches still `abort`. The dead shape `orr x8,x8,#0x4000` (both operands equal) is rejected outright — our own 14 MB library holds two `orr #0x4000` sites and only one qualifies.
+
+The safety rails are unchanged: an install that cannot be confident aborts, the boot gate checks everything layer by layer, and two failed boots auto-disable the module.
+
+**Self-test:** a payload rebuilt by forcing the semantic matcher is **byte-identical** to the proven payload (md5 `5ca0159e206fb93179b008aaa86e37d1`), and it runs clean under both the **busybox** and the **toybox** toolchain; 30 install-gate tests and 15 boot-script tests pass.
+
+**If it still aborts**, the message prints where `orr #0x4000` occurs and how many `csel` pairs were seen — paste that part when reporting.
 
 ### Known trigger: HyperCeiler's screenshot switch
 
@@ -127,10 +169,10 @@ The bug is not always reproducible. The most common trigger is the LSPosed modul
 
 ### Install
 
-Manager → Modules → Install from local → `Mirafix-v1.1.zip` → reboot
+Manager → Modules → Install from local → `Mirafix-v1.2.zip` → reboot
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
 reboot
 ```
 
@@ -179,19 +221,38 @@ v1.1 inverse tout l'approche : **l'archive ne contient aucun binaire** ; la char
 | Après une OTA | charge utile ancienne poussée sur un système nouveau | **identité non conforme → désactivation + log**, réinstallation requise |
 | Diagnostic | terminal nécessaire pour lire le log | un appui sur **Action** dans le gestionnaire |
 
-**Pourquoi c'est pensé pour tous les appareils HyperOS (澎湃)** : non par une liste blanche de modèles, mais en localisant l'instruction dans **la bibliothèque propre à l'appareil** à chaque installation —
+**Pourquoi c'est pensé pour tous les appareils HyperOS (澎湃)** : non par une liste blanche de modèles, mais en localisant l'instruction dans **la bibliothèque propre à l'appareil** à chaque installation, en essayant les niveaux par ordre de preuve décroissante — **chaque niveau doit correspondre une seule fois** :
 
 1. fenêtre d'instruction de 16 octets (`orr|tst|csel|ret`),
-2. repli sur 8 octets (`csel|ret`),
-3. puis sur le simple `csel` de 4 octets, à condition qu'il soit **unique dans toute la bibliothèque**.
+2. puis 8 octets (`csel|ret`),
+3. **le localisateur sémantique (nouveau dans v1.2)** — voir ci-dessous,
+4. enfin le simple `csel` de 4 octets (preuve la plus faible).
 
 Pas de correspondance, ou correspondance ambiguë → `abort`, rien n'est installé. **Mieux vaut laisser le bug tranquille que de toucher une bibliothèque système avec du non vérifié.**
 
-Le correctif, lui, n'a pas changé — ces 4 octets :
+Le correctif, lui, n'a pas changé pour les builds standards — ces 4 octets :
 
 | Fichier | Offset | Avant | Après |
 |---|---|---|---|
 | `libsurfaceflinger.so` | `0x5b9ba8` | `csel x0,x11,x8,ne` (`6011889a`) | `mov x0,x8` (`e00308aa`) |
+
+Sur un build produit par un autre compilateur, les registres et l'offset diffèrent ; là, **les octets du correctif sont déduits de ce qui a réellement été trouvé** (`mov x{dst du csel}, x{source propre}`), ce qui est strictement équivalent au tableau ci-dessus.
+
+### Nouveau dans v1.2 : le localisateur sémantique
+
+Un testeur sur **Xiaomi 17 (`pudding`, HyperOS 3 / Android 16)** a installé v1.1 : les trois niveaux par octets ont trouvé **0 correspondance**, l'installation s'est annulée en toute sécurité — le téléphone a démarré normalement, mais le bug de projection restait. La raison est simple : le compilateur de ce build a attribué **d'autres registres** au même code, donc l'instruction `6011889a` n'existe nulle part dans sa bibliothèque (11,2 Mo en stock, ce n'est pas le même artefact de compilation que les 14,2 Mo).
+
+v1.2 ne s'appuie plus seulement sur des octets :
+
+- il cherche d'abord **sémantiquement** `orr ?,?,#0x4000` — `GRALLOC_USAGE_PROTECTED` est la constante HAL fixe `0x4000`, et tout compilateur l'encode en cet `ORR` immédiat unique, quelle que soit l'attribution des registres ;
+- il exige ensuite un `csel` dans les 8 instructions suivantes dont les deux registres sources sont **exactement le `Ra` / le `Rb` de ce `orr`** — c'est-à-dire l'étape « choisir entre `usage|PROTECTED` et `usage` » elle-même ;
+- il doit être **unique dans toute la bibliothèque** ; 0 ou 2 correspondances → `abort`. La forme morte `orr x8,x8,#0x4000` (deux opérandes identiques) est écartée d'emblée — notre propre bibliothèque de 14 Mo contient deux sites `orr #0x4000` dont un seul convient.
+
+Les sécurités restent inchangées : une installation qui n'est pas sûre s'annule, la barrière de démarrage vérifie tout couche par couche, et deux échecs consécutifs désactivent le module.
+
+**Auto-test :** une charge utile reconstruite en forçant le localisateur sémantique est **identique octet à octet** à la charge validée (md5 `5ca0159e206fb93179b008aaa86e37d1`), et passe sous les deux chaînes d'outils **busybox** et **toybox** ; les 30 tests de barrière d'installation et les 15 tests de scripts de démarrage passent.
+
+**Si l'annulation persiste**, le message indique où se trouve `orr #0x4000` et combien de paires `csel` ont été vues — collez cette partie en cas de signalement.
 
 ### Déclencheur connu : l'option capture d'écran d'HyperCeiler
 
@@ -202,10 +263,10 @@ Le bug n'est pas toujours reproductible. Le déclencheur le plus fréquent est l
 
 ### Installation
 
-Gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.1.zip` → redémarrage
+Gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.2.zip` → redémarrage
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.2.zip
 reboot
 ```
 
@@ -239,7 +300,7 @@ reboot
 
 ### 📦 Fichier / Asset
 
-- `Mirafix-v1.1.zip` — 模块包，管理器直接安装 / module package, install it straight from the manager / paquet de module, à installer depuis le gestionnaire.
+- `Mirafix-v1.2.zip` — 模块包，管理器直接安装 / module package, install it straight from the manager / paquet de module, à installer depuis le gestionnaire.
 - Zip 里**不含任何预编译库**；载荷由安装脚本从本机库现场生成 / The zip ships **no pre-built library**; the payload is generated by the installer from the local one / L'archive **ne contient aucune bibliothèque précompilée** ; la charge utile est produite par l'installateur à partir de la locale.
 
 ### ✅ 要求 / Requirements / Prérequis

@@ -89,6 +89,9 @@ fi
 
 WANT_OFF=$(k offset)
 [ -n "$WANT_OFF" ] || { say "build.info 缺少 offset，保持 pending"; exit 1; }
+# tier D installs tell us which bytes they wrote; keep the check exact.
+_kp=$(k patch_hex)
+[ -n "$_kp" ] && PATCHED=$_kp
 
 # ---- give surfaceflinger a moment to come up ---------------------
 sf=$(pidof surfaceflinger)
