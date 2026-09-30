@@ -6,6 +6,8 @@
 Fixes **stock** Miracast / WFD casting from Xiaomi / HyperOS to **non-Xiaomi displays**.
 Corrige le miroir d'écran **d'origine** (Miracast / WFD) de Xiaomi / HyperOS vers un **écran non Xiaomi**.
 
+**当前版本 / Current release: `v1.1`**
+
 ---
 
 ## 中文
@@ -39,6 +41,17 @@ setCurWfdErrorCode=1008
 
 **这是整个 `libsurfaceflinger.so` 里唯一一处**给显示链路加保护位的指令（另一处 `#0x4000` 在 Skia 的 `GrGLExtensions` 里，无关）。
 
+### 已知触发源：HyperCeiler 的截屏开关
+
+这个 bug 不是必现的，实测最常见的**触发源**是 LSPosed 模块 **HyperCeiler（西米露）** 里的
+
+> 「允许在任何应用截屏」（以及同类的 *disable FLAG_SECURE* 设置）
+
+这类开关会把 App 侧的 `FLAG_SECURE` 关掉，但 `qtiSetOutputUsage` 仍然给输出 buffer OR 上 `GRALLOC_USAGE_PROTECTED`——于是一边是 non-secure 编码器输入、一边是 secure buffer，撞出上面那条 `qbuf -22`。
+
+- **临时绕过**：在 HyperCeiler 里关掉「允许在任何应用截屏」/ disable-flag-secure 相关项，重启投屏即恢复，不用刷任何东西。
+- **彻底修复**：装 Mirafix。补丁直接让输出 buffer 永不带 `0x4000`，无论那个开关是否打开都能投屏。
+
 ### 补丁
 
 把 4 个字节换掉，让它永远走「不加保护位」的分支：
@@ -49,32 +62,76 @@ setCurWfdErrorCode=1008
 
 净效果：输出 buffer 永远不带 `0x4000`，不再落 secure heap，编码器正常接收。
 
-### 要求
+### 要求与兼容性
 
-- 已 root 的 **KernelSU / ReZukisu**（其它 root 方案未测试）
-- 测试机型：**Xiaomi 17 Pro / HyperOS 4**，`ro.product.first_api_level` ≥ 34
-- 只改系统侧，**不改投影接收端、不装任何第三方投屏 App**
+- **root**：Magisk（官方 / Alpha）、KernelSU、ReZukisu。挂载由脚本接管（`skip_mount`），三套 root 走同一套逻辑。
+- **机型 / 系统**：面向**所有澎湃（HyperOS）系统**的设备设计，不靠机型白名单。
+- 安装时模块会**读取本机自己的 `libsurfaceflinger.so`**，在现场定位目标指令（16 字节窗口 → 8 字节 `csel+ret` → 4 字节 `csel` 三级匹配，**必须唯一命中**），然后生成补丁载荷。
+  - 命中 → 生成载荷，校验通过后安装成功，重启生效。
+  - **0 命中 / 命中不唯一 / 读不到原版 → 安装直接中止**，模块不会留在手机上，开机与出厂状态无异。
+- 只改系统侧，**不改投影接收端、不装任何第三方投屏 App**。
+- 模块自带**身份指纹**（机型 + `ro.build.fingerprint`）。OTA 升级后身份对不上会**自动禁用**并写日志，需要重新安装——不会拿旧系统的载荷去碰新系统。
 
 ### 安装
 
-方式一（推荐）：KernelSU 管理器 → 模块 → 从本地安装 `Mirafix-v1.0.zip` → 重启。
+方式一（推荐）：管理器 → 模块 → 从本地安装 `Mirafix-v1.1.zip` → 重启。
 
 方式二：命令行
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.0.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
 reboot
 ```
 
+Magisk / Alpha 同理：Magisk 管理器 → 模块 → 从本地安装 → 重启。
+
 ### 工作方式与安全兜底
 
-模块有三层：
+zip 里**不带任何预编译二进制**，载荷是安装时从本机库现场生成的。模块目录里有 `skip_mount`，所以自动挂载被关掉，挂载完全由脚本控制。
 
-1. **魔法挂载**：`system_ext/lib64/libsurfaceflinger.so` 由 KernelSU 在 post-fs-data 之前挂载——这是正常生效路径，实测抢在 `surfaceflinger` 启动前完成。
-2. **`post-fs-data.sh`**：读取偏移 `6003624`（`0x5b9ba8`）的 4 字节比对 `e00308aa`，不对就用 `nsenter -t 1 -m` 兜底绑定。
-3. **`service.sh`**：按 **inode**（不是路径，因为 lazy unmount 后内核会把 maps 路径渲染成 `/`）确认 `surfaceflinger` 真的加载了补丁库；没加载才重启一次 SF，且重启前强制检查载荷是 `0644`，SF 起不来立刻 `umount -l` 回滚原版。
+**开机闸门（`post-fs-data.sh`，任何一步不过就整段放弃，不影响开机）：**
 
-> ⚠️ 载荷权限必须是 `0644` + SELinux 类型 `system_lib_file`（与原文件一致）。若是 `0600` 或 `app_data_file`，`surfaceflinger`（uid 1000）`dlopen` 失败，连崩 4 次会触发看门狗**整机重启**。本模块已固化这两个属性。
+1. 上次启动没走完（`.boot_state` 还是 `pending`）→ **这次绝不绑定**，用原版库开机；连续 2 次 → 自动写 `disable` 自我禁用。
+2. 身份校验：`ro.build.fingerprint`、`ro.product.model` 与 `build.info` 记录不一致 → 跳过并禁用。
+3. 载荷校验：md5 与安装记录不符 / 权限不是 `0644`（会先自愈一次）/ SELinux 上下文不是 `system_lib_file` 或 `system_file` / 补丁 4 字节不对 → 全部跳过。
+4. 全部通过 → 先写 `pending`，再用 `nsenter -t 1 -m mount --bind` 绑定，并**读回 init 视角的 4 字节确认**，之后才让 `surfaceflinger` 起来。
+
+**`service.sh`（late_start）：** 按 **inode**（不是路径——lazy unmount 后内核会把 maps 路径渲染成 `/`）确认 SF 真的加载了补丁库；没加载最多重启 SF 2 次，每次重启前都重查载荷 `0644` + SELinux 上下文，SF 起不来立刻 `umount -l` 回滚原版，并把状态留在 `pending` 让下次开机保护性跳过。稳定后清零重试计数。
+
+> ⚠️ 载荷必须是 `0644` + `u:object_r:system_lib_file:s0`（与原文件一致）。若是 `0600` 或 `app_data_file`，`surfaceflinger`（uid 1000）`dlopen` 失败，连崩 4 次会触发看门狗**整机重启**。这一步装机和开机都强制校验，过不了就不挂载。
+
+### DRM 说明
+
+补丁只作用于 **虚拟显示器（投屏）输出路径**，本机播放受保护视频不受影响，Mirafix **也不绕过任何 DRM**。把受 DRM 保护的内容投出去时画面可能是黑的，这是 DRM 的正常行为，不是本模块的缺陷。
+
+### 出问题怎么自查 / 回报
+
+模块自带诊断按钮，**不用终端**：
+
+1. 管理器 → 模块 → Mirafix → **Action**
+2. 把输出整段复制出来发给我
+
+或者直接把 `/data/adb/mirafix.log` 发出来（里面只有机型 / 系统版本 / md5 / 偏移量，**没有序列号、IMEI、MAC、账号等任何个人信息**）。
+
+日志里关键行的含义：
+
+| 日志 | 含义 |
+|---|---|
+| `已绑定载荷 offset=...` | 本次开机补丁已生效 |
+| `上次启动未走完(pending)...保护性跳过` | 上次开机出过问题，这次自动改用原版保命 |
+| `连续 2 次启动异常，已自动禁用模块` | 模块已自我禁用，需在管理器里重新启用并重装 |
+| `系统指纹已变化（OTA？）...需重新安装` | 系统升级过，重装一次即可 |
+| `签名未找到 / 匹配不唯一`（安装时） | 本机型/系统不适用，安装已中止 |
+
+### 自救（万一开不了机）
+
+开机时进入**安全模式**，模块就不会被加载：
+
+1. 关机后开机，**在开机动画出现时长按音量下键**（Android 官方安全模式，会提示 "安全模式"）。
+2. Magisk：安全模式下 Magisk 会停用所有模块；KernelSU / ReZukisu 检测到 `ro.sys.safemode` 后会跳过所有模块脚本并禁用模块。
+3. 进系统后在管理器里移除或禁用 Mirafix，再正常重启。
+
+正常情况下**用不到这一步**：v1.1 的 `skip_mount` + 闸门脚本任何异常都只做一件事——不挂载、用原版库开机。
 
 ### 卸载 / 回滚
 
@@ -91,7 +148,7 @@ reboot
 
 - 逆向与验证全部在本机完成，补丁仅 4 字节。
 - 仅供学习研究；刷入前请自行备份。
-- 作者：**Petittux**
+- 作者：**Petittux** · GitHub：**Petittux1**
 
 ---
 
@@ -125,6 +182,17 @@ It ORs **`GRALLOC_USAGE_PROTECTED`** into the display output buffer usage, so gr
 
 This is the **only** instruction in the whole `libsurfaceflinger.so` that adds the protection bit on the display path (the other `#0x4000` lives in Skia's `GrGLExtensions` and is unrelated).
 
+### Known trigger: HyperCeiler's screenshot switch
+
+The bug is not always reproducible. The most common **trigger** found in practice is the LSPosed module **HyperCeiler**:
+
+> "Allow screenshots in any app" (and other *disable FLAG_SECURE* settings)
+
+Such switches turn `FLAG_SECURE` off on the app side, while `qtiSetOutputUsage` still ORs `GRALLOC_USAGE_PROTECTED` into the output buffer — so you end up with a non-secure encoder input against a secure buffer, producing the `qbuf -22` above.
+
+- **Temporary workaround:** switch "Allow screenshots in any app" / the disable-flag-secure option **off** in HyperCeiler and retry casting. Nothing gets flashed.
+- **Permanent fix:** install Mirafix. The patch makes the output buffer never carry `0x4000`, so casting works whether or not that switch is on.
+
 ### The patch
 
 Four bytes, forcing the "never protected" branch:
@@ -135,32 +203,76 @@ Four bytes, forcing the "never protected" branch:
 
 Net effect: output buffers never carry `0x4000`, they stay non-secure, and the encoder accepts them.
 
-### Requirements
+### Requirements & compatibility
 
-- Rooted **KernelSU / ReZukisu** (other root solutions untested)
-- Tested on **Xiaomi 17 Pro / HyperOS 4**, `ro.product.first_api_level` ≥ 34
-- System side only — **the sink is untouched, no third-party casting app is used**
+- **Root:** Magisk (official / Alpha), KernelSU, ReZukisu. Mounting is script-driven (`skip_mount`), so all three behave the same way.
+- **Device / OS:** designed for **every HyperOS (澎湃) device** — no model whitelist.
+- At install time the module **reads this device's own `libsurfaceflinger.so`** and locates the target instruction on the spot (16-byte window → 8-byte `csel+ret` → 4-byte `csel`, three tiers, and it **must match exactly once**), then builds the payload:
+  - matched → payload generated and verified, install succeeds, effective after reboot;
+  - **0 matches / more than one match / pristine file unreadable → the install aborts** and the module is never left on the phone, so the phone boots exactly as it did from the factory.
+- System side only — **the sink is untouched, no third-party casting app is used**.
+- The module records an **identity fingerprint** (model + `ro.build.fingerprint`). After an OTA the identity no longer matches, so the module **disables itself** and writes a log line — it will never push a payload built for the old system onto a new one.
 
 ### Install
 
-Recommended: KernelSU manager → Modules → Install from local → `Mirafix-v1.0.zip` → reboot.
+Recommended: manager → Modules → Install from local → `Mirafix-v1.1.zip` → reboot.
 
 Or from a shell:
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.0.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
 reboot
 ```
 
+Same thing in Magisk / Alpha: Magisk app → Modules → Install from local → reboot.
+
 ### How it works, and the safety rails
 
-Three layers:
+The zip ships **no prebuilt binary** — the payload is generated on-device at install time. The module directory contains a `skip_mount` file, so automatic mounting is disabled and the scripts control all mounting.
 
-1. **Magic mount** — `system_ext/lib64/libsurfaceflinger.so` is mounted by KernelSU before post-fs-data; in practice this wins the race against `surfaceflinger` startup, so no SF restart is needed.
-2. **`post-fs-data.sh`** — reads 4 bytes at offset `6003624` (`0x5b9ba8`) and compares with `e00308aa`; on mismatch it falls back to an explicit `nsenter -t 1 -m` bind mount.
-3. **`service.sh`** — confirms `surfaceflinger` really mapped the patched library by **inode** (not by path: after a lazy unmount the kernel renders the maps path as `/`), restarts SF once only if needed, refuses to restart unless the payload is `0644`, and immediately `umount -l`s back to stock if SF fails to come up.
+**Boot gate (`post-fs-data.sh`; any failed step abandons the whole thing and never blocks boot):**
 
-> ⚠️ The payload must be `0644` with SELinux type `system_lib_file` (identical to the original file). With `0600` or `app_data_file`, `surfaceflinger` (uid 1000) cannot `dlopen` it, dies 4 times in a minute and the watchdog **reboots the phone**. Both attributes are baked into this module.
+1. Previous boot never finished (`.boot_state` still `pending`) → **never bind this time**, boot with the library; twice in a row → writes `disable` and turns itself off.
+2. Identity: `ro.build.fingerprint` / `ro.product.model` differ from `build.info` → skip and disable.
+3. Payload: md5 differs from the install record / mode is not `0644` (it self-heals once first) / SELinux type is neither `system_lib_file` nor `system_file` / the 4 patched bytes are wrong → all skipped.
+4. Everything passes → write `pending`, bind with `nsenter -t 1 -m mount --bind`, then **read the 4 bytes back from init's view** to confirm before `surfaceflinger` is allowed to start.
+
+**`service.sh` (late_start):** confirms by **inode**, not path (after a lazy unmount the kernel renders the maps path as `/`), that SF really mapped the payload; if not, it restarts SF at most twice, re-checking `0644` + SELinux type before every restart, and `umount -l`s back to stock immediately if SF cannot come up, leaving the state `pending` so the next boot skips protectively. The retry counter is cleared once SF is stable.
+
+> ⚠️ The payload must be `0644` with SELinux type `u:object_r:system_lib_file:s0` (identical to the original file). With `0600` or `app_data_file`, `surfaceflinger` (uid 1000) cannot `dlopen` it, dies 4 times in a minute and the watchdog **reboots the phone**. Both are enforced at install time and again at boot; if either check fails, nothing gets mounted.
+
+### DRM note
+
+The patch only affects the **virtual display (cast) output path**, so local DRM playback is unaffected, and Mirafix **does not bypass DRM**. Casting DRM-protected content may show a black picture — that is normal DRM behaviour, not a defect of this module.
+
+### Troubleshooting / reporting
+
+The module ships a diagnostics button — **no terminal needed**:
+
+1. Manager → Modules → Mirafix → **Action**
+2. Copy the whole output and send it over.
+
+Or just share `/data/adb/mirafix.log` (it only contains model / OS version / md5 / offset — **no serial number, IMEI, MAC, account or any other personal data**).
+
+What the key log lines mean:
+
+| Log line | Meaning |
+|---|---|
+| `已绑定载荷 offset=...` | Patch is active for this boot |
+| `上次启动未走完(pending)...保护性跳过` | Last boot went wrong; this one fell back to stock to stay safe |
+| `连续 2 次启动异常，已自动禁用模块` | The module disabled itself — re-enable and reinstall |
+| `系统指纹已变化（OTA？）...需重新安装` | System was updated; just reinstall |
+| `signature not found / matched N places` (at install) | This build is not supported; the install aborted |
+
+### Recovery (if the phone ever fails to boot)
+
+Enter **safe mode** so no module loads:
+
+1. Power off, then power on and **hold volume down while the boot animation is showing** (stock Android safe mode; a "Safe mode" badge appears).
+2. Magisk disables all modules in safe mode; KernelSU / ReZukisu detects `ro.sys.safemode` and skips every module script while disabling all modules.
+3. Remove or disable Mirafix in the manager, then reboot normally.
+
+You should not need this with v1.1: `skip_mount` plus the gate scripts mean that **any** failure results in nothing being mounted and the phone booting with the stock library.
 
 ### Uninstall / rollback
 
@@ -177,7 +289,7 @@ Full uninstall: remove the module in the manager (or delete `/data/adb/modules/m
 
 - All reversing and verification was done on-device; the patch is 4 bytes.
 - For study and research only; back up before flashing.
-- Author: **Petittux**
+- Author: **Petittux** · GitHub: **Petittux1**
 
 ---
 
@@ -211,6 +323,17 @@ Le drapeau **`GRALLOC_USAGE_PROTECTED`** est ajouté à l'usage des buffers de s
 
 C'est la **seule** instruction de tout `libsurfaceflinger.so` qui ajoute ce bit sur le chemin d'affichage (l'autre `#0x4000` se trouve dans `GrGLExtensions` de Skia, sans rapport).
 
+### Déclencheur connu : l'option capture d'écran d'HyperCeiler
+
+Le bug n'est pas toujours reproductible. Le **déclencheur** le plus fréquent est le module LSPosed **HyperCeiler** :
+
+> « Autoriser la capture d'écran dans toutes les applications » (et les options du type *désactiver FLAG_SECURE*)
+
+Ces options coupent `FLAG_SECURE` côté application, alors que `qtiSetOutputUsage` continue d'ajouter `GRALLOC_USAGE_PROTECTED` au buffer de sortie : on obtient une entrée d'encodeur non sécurisée face à un buffer secure, d'où le `qbuf -22` ci-dessus.
+
+- **Contournement temporaire :** désactivez « Autoriser la capture d'écran… » / l'option désactivant FLAG_SECURE dans HyperCeiler, puis relancez la projection. Rien n'est flashé.
+- **Correction définitive :** installez Mirafix. Le correctif fait que le buffer de sortie ne porte jamais `0x4000`, la projection fonctionne donc que cette option soit activée ou non.
+
 ### Le correctif
 
 Quatre octets, en forçant la branche « jamais protégé » :
@@ -221,32 +344,76 @@ Quatre octets, en forçant la branche « jamais protégé » :
 
 Résultat : les buffers de sortie ne portent plus `0x4000`, restent non sécurisés, et l'encodeur les accepte.
 
-### Prérequis
+### Prérequis et compatibilité
 
-- **KernelSU / ReZukisu** rooté (autres solutions de root non testées)
-- Testé sur **Xiaomi 17 Pro / HyperOS 4**, `ro.product.first_api_level` ≥ 34
-- Côté système uniquement — **le récepteur n'est pas modifié, aucune application de projection tierce**
+- **Root :** Magisk (officiel / Alpha), KernelSU, ReZukisu. Le montage est piloté par les scripts (`skip_mount`), donc les trois se comportent de la même manière.
+- **Appareil / système :** conçu pour **tous les appareils HyperOS (澎湃)** — aucune liste blanche de modèles.
+- Au moment de l'installation, le module **lit la bibliothèque `libsurfaceflinger.so` de l'appareil** et y localise la cible sur place (fenêtre de 16 octets → `csel+ret` de 8 octets → `csel` de 4 octets, trois niveaux, et le résultat doit être **unique**), puis construit la charge utile :
+  - trouvé → charge utile générée et vérifiée, installation réussie, actif après redémarrage ;
+  - **0 occurrence / plusieurs occurrences / fichier d'origine illisible → l'installation est annulée** et le module n'est jamais laissé sur le téléphone : celui-ci démarre exactement comme en usine.
+- Côté système uniquement — **le récepteur n'est pas modifié, aucune application de projection tierce**.
+- Le module enregistre une **empreinte d'identité** (modèle + `ro.build.fingerprint`). Après une OTA l'identité ne correspond plus : le module **se désactive tout seul** et écrit une ligne de log — il ne poussera jamais une charge utile construite pour l'ancien système sur le nouveau.
 
 ### Installation
 
-Recommandé : gestionnaire KernelSU → Modules → Installer depuis un fichier local → `Mirafix-v1.0.zip` → redémarrage.
+Recommandé : gestionnaire → Modules → Installer depuis un fichier local → `Mirafix-v1.1.zip` → redémarrage.
 
 Ou en ligne de commande :
 
 ```sh
-/data/adb/ksud module install /sdcard/Download/Mirafix-v1.0.zip
+/data/adb/ksud module install /sdcard/Download/Mirafix-v1.1.zip
 reboot
 ```
 
+Idem sous Magisk / Alpha : app Magisk → Modules → Installer depuis un fichier local → redémarrage.
+
 ### Fonctionnement et sécurités
 
-Trois couches :
+L'archive ne contient **aucun binaire précompilé** — la charge utile est produite sur l'appareil à l'installation. Le dossier du module contient un fichier `skip_mount`, donc le montage automatique est désactivé et les scripts pilotent tout.
 
-1. **Magic mount** — `system_ext/lib64/libsurfaceflinger.so` est monté par KernelSU avant post-fs-data ; en pratique il gagne la course contre le démarrage de `surfaceflinger`, donc aucun redémarrage de SF n'est nécessaire.
-2. **`post-fs-data.sh`** — lit 4 octets à l'offset `6003624` (`0x5b9ba8`) et compare à `e00308aa` ; en cas d'écart, il pose un bind mount de secours via `nsenter -t 1 -m`.
-3. **`service.sh`** — vérifie que `surfaceflinger` a bien mappé la bibliothèque corrigée en se basant sur l'**inode** (pas sur le chemin : après un lazy unmount le noyau rend le chemin en `/` dans maps), ne redémarre SF qu'une seule fois si nécessaire, refuse de le faire si la charge utile n'est pas en `0644`, et `umount -l` immédiatement vers l'original si SF ne redémarre pas.
+**Barrière de démarrage (`post-fs-data.sh` ; le moindre échec abandonne l'ensemble et ne bloque jamais le boot) :**
 
-> ⚠️ La charge utile doit être `0644` avec le type SELinux `system_lib_file` (identique au fichier d'origine). Avec `0600` ou `app_data_file`, `surfaceflinger` (uid 1000) ne peut pas `dlopen` meurt 4 fois en une minute et le watchdog **redémarre le téléphone**. Ces deux attributs sont figés dans ce module.
+1. Le démarrage précédent n'a pas abouti (`.boot_state` encore `pending`) → **aucun montage cette fois**, démarrage sur la bibliothèque d'origine ; deux fois de suite → écrit `disable` et s'éteint tout seul.
+2. Identité : `ro.build.fingerprint` / `ro.product.model` différents de `build.info` → saut + désactivation.
+3. Charge utile : md5 différent de l'enregistrement / mode différent de `0644` (auto-réparé une fois d'abord) / type SELinux ni `system_lib_file` ni `system_file` / les 4 octets corrigés sont faux → tout est sauté.
+4. Tout est conforme → écrit `pending`, monte avec `nsenter -t 1 -m mount --bind`, puis **relit les 4 octets depuis la vue d'init** pour confirmer avant de laisser `surfaceflinger` démarrer.
+
+**`service.sh` (late_start) :** confirme par **inode**, pas par chemin (après un lazy unmount le noyau rend le chemin en `/` dans maps), que SF a bien mappé la charge utile ; sinon il redémarre SF au plus deux fois, en revérifiant `0644` + type SELinux avant chaque redémarrage, et `umount -l` vers l'original immédiatement si SF ne revient pas, en laissant l'état `pending` pour que le prochain boot saute par précaution. Le compteur d'essais est remis à zéro une fois SF stable.
+
+> ⚠️ La charge utile doit être `0644` avec le type SELinux `u:object_r:system_lib_file:s0` (identique au fichier d'origine). Avec `0600` ou `app_data_file`, `surfaceflinger` (uid 1000) ne peut pas `dlopen`, meurt 4 fois en une minute et le watchdog **redémarre le téléphone**. Les deux sont vérifiés à l'installation puis à chaque boot ; en cas d'échec, rien n'est monté.
+
+### Note DRM
+
+Le correctif ne touche que le **chemin de sortie de l'affichage virtuel (projection)** : la lecture DRM locale n'est pas affectée, et Mirafix **ne contourne aucun DRM**. Projeter un contenu protégé par DRM peut donner une image noire — c'est le comportement normal du DRM, pas un défaut du module.
+
+### Dépannage / signalement
+
+Le module embarque un bouton de diagnostic — **sans terminal** :
+
+1. Gestionnaire → Modules → Mirafix → **Action**
+2. Copiez toute la sortie et envoyez-la.
+
+Ou partagez simplement `/data/adb/mirafix.log` (il ne contient que modèle / version système / md5 / offset — **aucun numéro de série, IMEI, MAC, compte ou autre donnée personnelle**).
+
+Signification des lignes de log clés :
+
+| Ligne de log | Signification |
+|---|---|
+| `已绑定载荷 offset=...` | Correctif actif pour ce démarrage |
+| `上次启动未走完(pending)...保护性跳过` | Le boot précédent a échoué → repli sur l'original par sécurité |
+| `连续 2 次启动异常，已自动禁用模块` | Le module s'est désactivé : réactivez et réinstallez |
+| `系统指纹已变化（OTA？）...需重新安装` | Système mis à jour : réinstallez |
+| `signature not found / matched N places` (à l'installation) | Ce build n'est pas pris en charge ; installation annulée |
+
+### Récupération (si le téléphone ne démarre plus)
+
+Entrez en **mode de sécurité** pour qu'aucun module ne se charge :
+
+1. Éteignez, rallumez et **maintenez volume bas pendant l'animation de démarrage** (mode de sécurité Android ; un badge « Safe mode » apparaît).
+2. Magisk désactive tous les modules en mode de sécurité ; KernelSU / ReZukisu détecte `ro.sys.safemode`, ignore tous les scripts de modules et les désactive.
+3. Supprimez ou désactivez Mirafix dans le gestionnaire, puis redémarrez normalement.
+
+Avec v1.1 vous ne devriez pas en avoir besoin : `skip_mount` et les scripts de barrière font que **la moindre anomalie** se traduit par rien de monté et un démarrage sur la bibliothèque d'origine.
 
 ### Désinstallation / retour arrière
 
@@ -263,7 +430,7 @@ Désinstallation complète : supprimer le module dans le gestionnaire (ou `/data
 
 - Rétro-ingénierie et vérification réalisées sur l'appareil ; le correctif fait 4 octets.
 - À but pédagogique uniquement ; sauvegardez avant de flasher.
-- Auteur : **Petittux**
+- Auteur : **Petittux** · GitHub : **Petittux1**
 
 ---
 
